@@ -1,0 +1,40 @@
+name: Repository integrity
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-tree:
+    name: Verify complete source tree
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify canonical DAW source files are present
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            src/engine/engine.cpp
+            src/engine/graph.cpp
+            src/session/session.cpp
+            src/plugins/plugin_library.cpp
+            src/ui
+            tests/test_main.cpp
+            CMakeLists.txt
+          )
+          missing=0
+          for path in "${required[@]}"; do
+            if [[ ! -e "$path" ]]; then
+              echo "::error file=$path::Required Wezt source path is missing from this repository."
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            echo "The repository is an incomplete source snapshot. Restore the canonical Wezt source archive before running build/test matrices."
+            exit 1
+          fi
+          echo "Required source paths are present."
