@@ -1,9 +1,4 @@
 cmake_minimum_required(VERSION 3.20)
-# macOS: run on macOS 12 and later, not only on the SDK's own version (must be set before project()).
-# Without this, Apple's compiler stamps the runner's newest macOS as the minimum and older Macs refuse to launch the app.
-if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
-  set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS version")
-endif()
 project(WeztRecordingTools VERSION 0.7.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -16,7 +11,7 @@ if(MSVC)
   add_compile_options(/utf-8 /Zc:__cplusplus)
 endif()
 
-option(WEZT_BUILD_UI "Build the Dear ImGui + GLFW app (wezt-studio) and the UI tests" OFF)
+option(WEZT_BUILD_UI "Build the Qt UI" OFF)
 option(WEZT_ENABLE_VST3 "Host VST3 plugins (needs the Steinberg VST3 SDK, MIT licensed)" OFF)
 set(WEZT_VST3_SDK_DIR "" CACHE PATH "Path to a checkout of github.com/steinbergmedia/vst3sdk (with submodules)")
 option(WEZT_ENABLE_CLAP "Host CLAP plugins (needs the MIT-licensed CLAP headers)" OFF)
@@ -29,11 +24,6 @@ add_library(wezt_core
   src/engine/graph.cpp
   src/engine/engine.cpp
   src/io/wav.cpp
-  src/io/audio_file.cpp
-  src/util/prefs.cpp
-  src/ui/logo.cpp
-  src/ui/logo_sdf.cpp
-  src/ui/intro_sound.cpp
   src/audio/null_device.cpp
   src/audio/wasapi_device.cpp
   src/audio/coreaudio_device.cpp
@@ -41,7 +31,6 @@ add_library(wezt_core
   src/plugins/aax_twin.cpp
   src/plugins/plugin_library.cpp
   src/session/track_source.cpp
-  src/session/automated_effect.cpp
   src/session/session.cpp
   src/edit/memory_locations.cpp
   src/music/midi.cpp
@@ -64,9 +53,6 @@ add_library(wezt_core
   src/agent/plugin_agent.cpp
   src/voice/voice_analysis.cpp
   src/voice/voice_takes.cpp
-  src/midi/midi_input.cpp
-  src/midi/midi_input_win.cpp
-  src/midi/midi_input_mac.cpp
   src/music/vocal_fit.cpp
   src/edit/clip_tools.cpp
   src/edit/piano_roll.cpp
@@ -90,16 +76,15 @@ add_library(wezt_core
   src/immersive/loudness.cpp
   src/immersive/adm.cpp)
 target_include_directories(wezt_core PUBLIC src include)
-target_include_directories(wezt_core SYSTEM PRIVATE third_party/minimp3)
 if(MSVC)
   target_compile_options(wezt_core PRIVATE /W4)
 else()
   target_compile_options(wezt_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 if(WIN32)
-  target_link_libraries(wezt_core PUBLIC ole32 avrt uuid winmm)
+  target_link_libraries(wezt_core PUBLIC ole32 avrt uuid)
 elseif(APPLE)
-  target_link_libraries(wezt_core PUBLIC "-framework AudioToolbox" "-framework CoreAudio" "-framework CoreFoundation" "-framework CoreMIDI")
+  target_link_libraries(wezt_core PUBLIC "-framework AudioToolbox" "-framework CoreAudio" "-framework CoreFoundation")
 else()
   find_package(Threads REQUIRED)
   target_link_libraries(wezt_core PUBLIC Threads::Threads)
@@ -125,10 +110,9 @@ if(WEZT_ENABLE_VST3)
   if(WIN32)
     list(APPEND WEZT_VST3_SDK_SOURCES ${WEZT_VST3_SDK_DIR}/public.sdk/source/vst/hosting/module_win32.cpp)
   elseif(APPLE)
-    # The SDK's Objective-C++ module loader, compiled by the C++ driver with -x objective-c++ (enable_language(OBJCXX)
-    # fails to set up its compile rule on current CMake after the SDK has configured its own OBJCXX targets).
+    enable_language(OBJCXX)
     set(_mm ${WEZT_VST3_SDK_DIR}/public.sdk/source/vst/hosting/module_mac.mm)
-    set_source_files_properties(${_mm} PROPERTIES LANGUAGE CXX COMPILE_FLAGS "-x objective-c++ -fobjc-arc")
+    set_source_files_properties(${_mm} PROPERTIES COMPILE_FLAGS "-fobjc-arc")
     list(APPEND WEZT_VST3_SDK_SOURCES ${_mm})
   else()
     list(APPEND WEZT_VST3_SDK_SOURCES ${WEZT_VST3_SDK_DIR}/public.sdk/source/vst/hosting/module_linux.cpp)
@@ -137,13 +121,13 @@ if(WEZT_ENABLE_VST3)
   target_include_directories(wezt_vst3 PUBLIC src ${WEZT_VST3_SDK_DIR})
   target_link_libraries(wezt_vst3 PUBLIC wezt_core sdk_hosting sdk sdk_common base pluginterfaces ${CMAKE_DL_LIBS})
   if(APPLE)
-    target_link_libraries(wezt_vst3 PUBLIC "-framework CoreFoundation" "-framework Foundation")   # module_mac.mm uses NSBundle, NSFileManager, NSLog
+    target_link_libraries(wezt_vst3 PUBLIC "-framework CoreFoundation")
   endif()
   target_compile_definitions(wezt_core PUBLIC WEZT_HAS_VST3=1)
 endif()
 
 if(WEZT_ENABLE_VST3 AND NOT WEZT_VST3_TEST_PLUGIN AND SMTG_ENABLE_VST3_PLUGIN_EXAMPLES)
-  set(WEZT_VST3_TEST_PLUGIN "${CMAKE_BINARY_DIR}/VST3/$<CONFIG>/again-sample-accurate.vst3")
+  set(WEZT_VST3_TEST_PLUGIN "${CMAKE_BINARY_DIR}/VST3/${CMAKE_BUILD_TYPE}/again-sample-accurate.vst3")
 endif()
 
 enable_testing()
@@ -198,26 +182,18 @@ endif()
 if(WEZT_ENABLE_VST3)
   add_executable(wezt_vst3_test tests/test_vst3.cpp)
   target_link_libraries(wezt_vst3_test PRIVATE wezt_vst3)
-  # Do not pass an empty string as argv[1]. With VST3 hosting enabled but no sample
-  # module configured, the test must reach its no-argument path and report SKIP (77).
-  if(WEZT_VST3_TEST_PLUGIN)
-    add_test(NAME wezt_vst3_test COMMAND wezt_vst3_test "${WEZT_VST3_TEST_PLUGIN}")
-  else()
-    add_test(NAME wezt_vst3_test COMMAND wezt_vst3_test)
-  endif()
-  set_tests_properties(wezt_vst3_test PROPERTIES SKIP_RETURN_CODE 77)
+  add_test(NAME wezt_vst3_test COMMAND wezt_vst3_test $<$<BOOL:${WEZT_VST3_TEST_PLUGIN}>:${WEZT_VST3_TEST_PLUGIN}>)
 
   # MIDI delivery to real VST3 instruments: classes from the SDK's mda-vst3 bundle.
   add_executable(wezt_vst3_midi_test tests/test_vst3_midi.cpp)
   target_link_libraries(wezt_vst3_midi_test PRIVATE wezt_vst3)
   if(SMTG_ENABLE_VST3_PLUGIN_EXAMPLES)
-    set(WEZT_VST3_TEST_INSTRUMENT "${CMAKE_BINARY_DIR}/VST3/$<CONFIG>/mda-vst3.vst3")
+    set(WEZT_VST3_TEST_INSTRUMENT "${CMAKE_BINARY_DIR}/VST3/${CMAKE_BUILD_TYPE}/mda-vst3.vst3" CACHE FILEPATH "")
     add_dependencies(wezt_vst3_midi_test mda-vst3)
     add_test(NAME wezt_vst3_midi_piano COMMAND wezt_vst3_midi_test ${WEZT_VST3_TEST_INSTRUMENT} "mda Piano")
     add_test(NAME wezt_vst3_midi_dx10 COMMAND wezt_vst3_midi_test ${WEZT_VST3_TEST_INSTRUMENT} "mda DX10")
     add_test(NAME wezt_vst3_midi_epiano COMMAND wezt_vst3_midi_test ${WEZT_VST3_TEST_INSTRUMENT} "mda EPiano")
     add_test(NAME wezt_vst3_midi_jx10 COMMAND wezt_vst3_midi_test ${WEZT_VST3_TEST_INSTRUMENT} "mda JX10")
-    set_tests_properties(wezt_vst3_midi_piano wezt_vst3_midi_dx10 wezt_vst3_midi_epiano wezt_vst3_midi_jx10 PROPERTIES SKIP_RETURN_CODE 77)
   endif()
 endif()
 
@@ -237,7 +213,6 @@ if(WEZT_ENABLE_CLAP)
   add_executable(wezt_clap_test tests/test_clap.cpp)
   target_link_libraries(wezt_clap_test PRIVATE wezt_clap)
   add_test(NAME wezt_clap_test COMMAND wezt_clap_test $<TARGET_FILE:wezt_test_gain>)
-  set_tests_properties(wezt_clap_test PROPERTIES SKIP_RETURN_CODE 77)
 
   # Test subject for MIDI delivery: a CLAP instrument that takes note events (and a twin that takes raw MIDI).
   add_library(wezt_test_synth MODULE tests/clap_synth/synth_plugin.cpp)
@@ -246,7 +221,6 @@ if(WEZT_ENABLE_CLAP)
   add_executable(wezt_clap_midi_test tests/test_clap_midi.cpp)
   target_link_libraries(wezt_clap_midi_test PRIVATE wezt_clap)
   add_test(NAME wezt_clap_midi_test COMMAND wezt_clap_midi_test $<TARGET_FILE:wezt_test_synth> $<TARGET_FILE:wezt_test_gain>)
-  set_tests_properties(wezt_clap_midi_test PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 if(WEZT_ENABLE_BRIDGE)
@@ -265,16 +239,10 @@ if(WEZT_ENABLE_BRIDGE)
   # separately (cmake -A Win32 on Windows) and pointed to by BridgeConfig::helperExecutable.
   add_executable(wezt-bridge src/plugins/bridge/bridge_helper.cpp)
   target_link_libraries(wezt-bridge PRIVATE wezt_bridge wezt_vst3)
-  if(WEZT_ENABLE_CLAP)
-    target_link_libraries(wezt-bridge PRIVATE wezt_clap)   # sets WEZT_HAS_CLAP through wezt_core
-  endif()
 
   add_executable(wezt_bridge_test tests/test_bridge.cpp)
   target_link_libraries(wezt_bridge_test PRIVATE wezt_bridge wezt_vst3)
-  if(WEZT_ENABLE_CLAP)
-    target_link_libraries(wezt_bridge_test PRIVATE wezt_clap)
-  endif()
-  add_test(NAME wezt_bridge_test COMMAND wezt_bridge_test $<TARGET_FILE:wezt-bridge> $<$<BOOL:${WEZT_VST3_TEST_PLUGIN}>:${WEZT_VST3_TEST_PLUGIN}> $<$<AND:$<BOOL:${WEZT_VST3_TEST_PLUGIN}>,$<BOOL:${WEZT_VST3_TEST_INSTRUMENT}>>:${WEZT_VST3_TEST_INSTRUMENT}> $<$<BOOL:${WEZT_ENABLE_CLAP}>:--clap $<TARGET_FILE:wezt_test_gain>>)
+  add_test(NAME wezt_bridge_test COMMAND wezt_bridge_test $<TARGET_FILE:wezt-bridge> $<$<BOOL:${WEZT_VST3_TEST_PLUGIN}>:${WEZT_VST3_TEST_PLUGIN}>)
 endif()
 
 # Make `cmake --build` + `ctest` work with no manual steps: when the SDK's sample plugins are enabled,
@@ -285,11 +253,6 @@ if(WEZT_ENABLE_VST3 AND TARGET again-sample-accurate)
       add_dependencies(${t} again-sample-accurate)
     endif()
   endforeach()
-endif()
-if(WEZT_ENABLE_VST3 AND SMTG_ENABLE_VST3_PLUGIN_EXAMPLES AND TARGET mda-vst3)
-  if(TARGET wezt_vst3_midi_test)
-    add_dependencies(wezt_vst3_midi_test mda-vst3)
-  endif()
 endif()
 
 add_executable(wezt_midi_test tests/test_midi.cpp)
@@ -312,11 +275,6 @@ add_executable(wezt_param_automation_test tests/test_param_automation.cpp)
 target_link_libraries(wezt_param_automation_test PRIVATE wezt_core)
 add_test(NAME wezt_param_automation_test COMMAND wezt_param_automation_test)
 
-add_executable(wezt_intro_test tests/test_intro.cpp)
-target_link_libraries(wezt_intro_test PRIVATE wezt_core)
-target_compile_definitions(wezt_intro_test PRIVATE WEZT_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
-add_test(NAME wezt_intro_test COMMAND wezt_intro_test)
-
 add_executable(wezt_session_test tests/test_session.cpp)
 target_link_libraries(wezt_session_test PRIVATE wezt_core)
 add_test(NAME wezt_session_test COMMAND wezt_session_test)
@@ -332,30 +290,16 @@ if(WEZT_BUILD_UI)
     message(FATAL_ERROR "WEZT_IMGUI_DIR must point at a Dear ImGui checkout")
   endif()
   add_library(wezt_ui STATIC
-    src/ui/app.cpp src/ui/app_edit.cpp src/ui/app_mix.cpp src/ui/app_sampler.cpp src/ui/app_immersive.cpp src/ui/app_demo.cpp src/ui/app_assistant.cpp src/ui/app_clips.cpp src/ui/app_midi.cpp src/ui/app_voice.cpp src/ui/app_plugins.cpp src/ui/app_settings.cpp src/ui/intro.cpp src/ui/intro_gl.cpp src/ui/insert_factory.cpp
+    src/ui/app.cpp src/ui/app_edit.cpp src/ui/app_mix.cpp src/ui/app_sampler.cpp src/ui/app_immersive.cpp src/ui/app_demo.cpp src/ui/app_assistant.cpp src/ui/app_clips.cpp src/ui/app_midi.cpp src/ui/app_voice.cpp src/ui/app_plugins.cpp
     ${WEZT_IMGUI_DIR}/imgui.cpp ${WEZT_IMGUI_DIR}/imgui_draw.cpp ${WEZT_IMGUI_DIR}/imgui_tables.cpp ${WEZT_IMGUI_DIR}/imgui_widgets.cpp
     ${WEZT_IMGUI_DIR}/misc/cpp/imgui_stdlib.cpp)
   target_include_directories(wezt_ui PUBLIC src ${WEZT_IMGUI_DIR})
   target_link_libraries(wezt_ui PUBLIC wezt_core)
-  if(WEZT_ENABLE_VST3)
-    target_link_libraries(wezt_ui PUBLIC wezt_vst3)
-  endif()
-  if(WEZT_ENABLE_CLAP)
-    target_link_libraries(wezt_ui PUBLIC wezt_clap)
-  endif()
-  if(WEZT_ENABLE_BRIDGE)
-    target_link_libraries(wezt_ui PUBLIC wezt_bridge)
-  endif()
   add_executable(wezt_ui_test tests/test_ui.cpp)
   target_link_libraries(wezt_ui_test PRIVATE wezt_ui)
   add_test(NAME wezt_ui_test COMMAND wezt_ui_test)
   add_executable(wezt_ui_snapshot tools/ui_snapshot.cpp)
   target_link_libraries(wezt_ui_snapshot PRIVATE wezt_ui)
-  if(UNIX AND NOT APPLE)
-    # Dev tool: renders the GL intro offscreen through EGL (Mesa software rendering is enough) to check how it looks.
-    add_executable(wezt_intro_gl_snapshot tools/intro_gl_snapshot.cpp)
-    target_link_libraries(wezt_intro_gl_snapshot PRIVATE wezt_ui ${CMAKE_DL_LIBS})
-  endif()
 
   set(_glfw_ok OFF)
   if(WEZT_GLFW_DIR AND EXISTS "${WEZT_GLFW_DIR}/CMakeLists.txt")
@@ -376,10 +320,6 @@ if(WEZT_BUILD_UI)
       ${WEZT_IMGUI_DIR}/backends/imgui_impl_glfw.cpp ${WEZT_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp)
     target_include_directories(wezt-studio PRIVATE ${WEZT_IMGUI_DIR})
     target_link_libraries(wezt-studio PRIVATE wezt_ui glfw OpenGL::GL)
-    if(MSVC)   # a desktop program: no console window behind it (main() stays the entry point)
-      set_target_properties(wezt-studio PROPERTIES WIN32_EXECUTABLE TRUE)
-      target_link_options(wezt-studio PRIVATE /ENTRY:mainCRTStartup)
-    endif()
   else()
     message(STATUS "wezt-studio not built: GLFW or OpenGL not found (the snapshot tool is still built)")
   endif()
@@ -407,10 +347,6 @@ target_link_libraries(wezt-mcp PRIVATE wezt_core)
 add_executable(wezt_agent_test tests/test_agent.cpp)
 target_link_libraries(wezt_agent_test PRIVATE wezt_core)
 add_test(NAME wezt_agent_test COMMAND wezt_agent_test)
-
-add_executable(wezt_realtime_dsp_test tests/test_realtime_dsp.cpp)
-target_link_libraries(wezt_realtime_dsp_test PRIVATE wezt_core)
-add_test(NAME wezt_realtime_dsp_test COMMAND wezt_realtime_dsp_test)
 
 add_executable(wezt_mcp_test tests/test_mcp.cpp)
 target_link_libraries(wezt_mcp_test PRIVATE wezt_core)
@@ -445,9 +381,6 @@ add_test(NAME wezt_voice_bank_test COMMAND wezt_voice_bank_test)
 add_executable(wezt_voice_takes_test tests/test_voice_takes.cpp)
 target_link_libraries(wezt_voice_takes_test PRIVATE wezt_core)
 add_test(NAME wezt_voice_takes_test COMMAND wezt_voice_takes_test)
-add_executable(wezt_midi_input_test tests/test_midi_input.cpp)
-target_link_libraries(wezt_midi_input_test PRIVATE wezt_core)
-add_test(NAME wezt_midi_input_test COMMAND wezt_midi_input_test)
 
 add_executable(wezt_voice_analysis_test tests/test_voice_analysis.cpp)
 target_link_libraries(wezt_voice_analysis_test PRIVATE wezt_core)
